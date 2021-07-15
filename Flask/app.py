@@ -1,10 +1,13 @@
-from flask import Flask, render_template, redirect, url_for, flash, request
+from flask import Flask, render_template, redirect, url_for, flash, request,jsonify,session
 from flask_sqlalchemy import SQLAlchemy
 from flask_wtf import FlaskForm
+from flask_wtf.file import FileField, FileAllowed
 from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import Length, EqualTo, Email,  DataRequired, ValidationError
 from flask_login import LoginManager, login_user, UserMixin, logout_user, login_required, current_user
-
+from PIL import Image
+import secrets
+import os
 
 app = Flask(__name__)
 
@@ -24,6 +27,7 @@ class User(db.Model, UserMixin): # SQL ORM Table
     username = db.Column(db.String(length=30), nullable = False, unique=True)
     email_address = db.Column(db.String(length=50), nullable = False, unique=True)
     password_hash  = db.Column(db.String(length=60), nullable = False)
+    profile_image = db.Column(db.String(length=20), nullable=False, default='DefaultProfilePicture.jpg')
 
 
 class RegisterForm(FlaskForm):
@@ -53,6 +57,28 @@ class LoginForm(FlaskForm):
     password = PasswordField(label="Password", validators = [DataRequired()] )
     submit = SubmitField(label='Login')
 
+class UpdateProfileForm(FlaskForm):
+
+    def validate_username(self, username_to_check): # function is called like this becuase validate_ will auto look for a field named username and will validate it
+
+        if username_to_check.data != current_user.username:
+            user = User.query.filter_by(username=username_to_check.data).first()
+            if user:
+                raise ValidationError("Username already exists ! ")
+
+
+    def validate_email_address(self,email_address_to_check):
+        email_address = User.query.filter_by(email_address=email_address_to_check.data).first() # look in the db if input user matches with exiting user if they match is NOT NONE and if statement executes
+
+        if email_address_to_check.data != current_user.email_address:
+            if email_address:
+                raise ValidationError("Email already exists ! ")
+
+
+    username = StringField(label="username", validators = [Length(min=2, max=30), DataRequired() ] )
+    email_address = StringField(label="email", validators = [Email(), DataRequired()] ) # validate email
+    profile_image = FileField(label='Edit Profile Picture', validators=[FileAllowed(['png','jpg'])])
+    submit = SubmitField(label='Submit')
 
 
 @app.route("/")
@@ -66,12 +92,40 @@ def about(username): # pass in what the user types in url
 
     return f'This  is the about page of {username} '
 
+def image(form_profile_image):
+    hex = secrets.token_hex(8)
+    _, f_ext = os.path.splitext(form_profile_image.filename)
+    picture_fn = hex + f_ext
+    picture_path = os.path.join(app.root_path, 'static/profile_images', picture_fn)
+    # resize
+    output_size = (125, 125)
+    i = Image.open(form_profile_image)
+    i.thumbnail(output_size)
+    i.save(picture_path)
+    return picture_fn
 
-
-@app.route("/profile")
+@app.route("/profile", methods = ['GET', 'POST'])
 @login_required
 def profile():
-    return render_template("profile.html")
+    form = UpdateProfileForm()
+    if form.validate_on_submit():
+        if form.profile_image.data: # if user submits profile picture
+            picture_file = image(form.profile_image.data)
+            current_user.profile_image = picture_file
+
+        current_user.username = form.username.data
+        current_user.email_address = form.email_address.data
+        db.session.commit()
+        flash('Updated Profile!')
+        return redirect('profile')
+    elif request.method == "GET": # if refresh page:
+        form.username.data = current_user.username
+        form.email_address.data = current_user.email_address
+
+
+
+    profile_image = url_for('static', filename='profile_images/' + current_user.profile_image) #load profile picture
+    return render_template("profile.html", profile_image=profile_image, form=form)
 
 
 
@@ -126,3 +180,45 @@ def logout():
     logout_user()
     flash("You have been logged out!", category="info")
     return redirect(url_for("home"))
+
+
+# API
+
+@app.route('/api_home')
+def api_home():
+    if 'username' in session:
+        username = session['username']
+        return jsonify({'message' : 'You are already logged in', 'username' : username})
+    else:
+        resp = jsonify({'message' : 'Unauthorized'})
+        resp.status_code = 401
+        return resp
+
+@app.route('/api_login', methods=['POST'])
+def api_login():
+    _json = request.json
+    _username = _json['username']
+    _password = _json['password']
+    attempted_user = User.query.filter_by(username=_username).first()
+    attempted_password = User.query.filter_by(password_hash=_password).first()
+    print(_password)
+    # validate the received values
+    if attempted_user and attempted_password:
+
+
+        return jsonify({'message': 'You are logged in successfully'})
+    else:
+        resp = jsonify({'message': 'Bad Request - invalid password'})
+        resp.status_code = 400
+        return resp
+
+@app.route('/api_signup', methods=['POST'])
+def api_signup():
+    _json = request.json
+    _username = _json['username']
+    _password = _json['password']
+    _email = _json['email']
+    userCreated = User(username=_username, email_address=_email,password_hash=_password)
+    db.session.add(userCreated)  # add user that was created
+    db.session.commit()  # commit user that was added
+    return jsonify({'message': 'Creates user successfully'})
